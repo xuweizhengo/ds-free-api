@@ -8,9 +8,9 @@
 //! 对于 `image_url` 的 HTTP URL，标记为需要开启搜索模式，
 //! 对应的 content part 在 prompt 中呈现为 `[请访问这个链接: {url}]`。
 
-use crate::ds_core::FilePayload;
 use crate::openai_adapter::types::{ChatCompletionsRequest, ContentPart, MessageContent};
 use base64::Engine;
+use ds_core::FilePayload;
 
 /// 文件提取结果
 pub(crate) struct ExtractResult {

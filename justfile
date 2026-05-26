@@ -10,6 +10,7 @@ check:
   cargo clippy -- -D warnings  
   cargo audit --deny warnings
   cargo outdated --exit-code 1 --root-deps-only
+  cargo outdated -p ds_core --exit-code 1 --root-deps-only
   cargo machete          
 
 # Build + lint frontend (bun install --frozen-lockfile, bun run typecheck + build + lint)

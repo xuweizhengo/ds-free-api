@@ -30,7 +30,7 @@ pub struct LoginResponse {
 
 #[derive(Serialize)]
 pub struct AdminStatusResponse {
-    pub accounts: Vec<crate::ds_core::AccountStatus>,
+    pub accounts: Vec<ds_core::AccountStatus>,
     pub total: usize,
     pub idle: usize,
     pub busy: usize,
@@ -47,22 +47,15 @@ pub struct AdminStatsResponse {
 #[derive(Serialize)]
 pub struct AdminConfigResponse {
     pub server: ServerConfigView,
-    pub deepseek: DeepSeekConfigView,
-    pub accounts: Vec<AccountView>,
+    pub ds_core: DsCoreView,
     pub proxy: ProxyConfigView,
     pub admin: AdminConfigView,
     pub api_keys: Vec<ApiKeyEntryView>,
 }
 
 #[derive(Serialize)]
-pub struct ServerConfigView {
-    pub host: String,
-    pub port: u16,
-    pub cors_origins: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct DeepSeekConfigView {
+pub struct DsCoreView {
+    pub accounts: Vec<AccountView>,
     pub api_base: String,
     pub wasm_url: String,
     pub user_agent: String,
@@ -75,6 +68,13 @@ pub struct DeepSeekConfigView {
     pub input_character_limits: Vec<u32>,
     pub model_aliases: Vec<String>,
     pub tool_call: ToolCallTagConfigView,
+}
+
+#[derive(Serialize)]
+pub struct ServerConfigView {
+    pub host: String,
+    pub port: u16,
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -116,21 +116,32 @@ fn mask_config(config: &Config) -> AdminConfigResponse {
             port: config.server.port,
             cors_origins: config.server.cors_origins.clone(),
         },
-        deepseek: DeepSeekConfigView {
-            api_base: config.deepseek.api_base.clone(),
-            wasm_url: config.deepseek.wasm_url.clone(),
-            user_agent: config.deepseek.user_agent.clone(),
-            client_version: config.deepseek.client_version.clone(),
-            client_platform: config.deepseek.client_platform.clone(),
-            client_locale: config.deepseek.client_locale.clone(),
-            model_types: config.deepseek.model_types.clone(),
-            max_input_tokens: config.deepseek.max_input_tokens.clone(),
-            max_output_tokens: config.deepseek.max_output_tokens.clone(),
-            input_character_limits: config.deepseek.input_character_limits.clone(),
-            model_aliases: config.deepseek.model_aliases.clone(),
+        ds_core: DsCoreView {
+            accounts: config
+                .ds_core
+                .accounts
+                .iter()
+                .map(|a| AccountView {
+                    email: a.email.clone(),
+                    mobile: a.mobile.clone(),
+                    area_code: a.area_code.clone(),
+                    password: a.password.clone(),
+                })
+                .collect(),
+            api_base: config.ds_core.api_base.clone(),
+            wasm_url: config.ds_core.wasm_url.clone(),
+            user_agent: config.ds_core.user_agent.clone(),
+            client_version: config.ds_core.client_version.clone(),
+            client_platform: config.ds_core.client_platform.clone(),
+            client_locale: config.ds_core.client_locale.clone(),
+            model_types: config.ds_core.model_types.clone(),
+            max_input_tokens: config.ds_core.max_input_tokens.clone(),
+            max_output_tokens: config.ds_core.max_output_tokens.clone(),
+            input_character_limits: config.ds_core.input_character_limits.clone(),
+            model_aliases: config.ds_core.model_aliases.clone(),
             tool_call: ToolCallTagConfigView {
-                extra_starts: config.deepseek.tool_call.extra_starts.clone(),
-                extra_ends: config.deepseek.tool_call.extra_ends.clone(),
+                extra_starts: config.ds_core.tool_call.extra_starts.clone(),
+                extra_ends: config.ds_core.tool_call.extra_ends.clone(),
             },
         },
         proxy: ProxyConfigView {
@@ -146,16 +157,6 @@ fn mask_config(config: &Config) -> AdminConfigResponse {
             .map(|k| ApiKeyEntryView {
                 key: k.key.clone(),
                 description: k.description.clone(),
-            })
-            .collect(),
-        accounts: config
-            .accounts
-            .iter()
-            .map(|a| AccountView {
-                email: a.email.clone(),
-                mobile: a.mobile.clone(),
-                area_code: a.area_code.clone(),
-                password: a.password.clone(),
             })
             .collect(),
     }
@@ -272,9 +273,10 @@ pub(crate) async fn admin_put_config(
     // API keys match by `id` (stable identifier), falling back to description for old-format migration.
     {
         let current = state.config.read().await;
-        for a in &mut new_config.accounts {
+        for a in &mut new_config.ds_core.accounts {
             if (a.password.is_empty() || a.password == "***")
                 && let Some(existing) = current
+                    .ds_core
                     .accounts
                     .iter()
                     .find(|e| e.email == a.email && e.mobile == a.mobile)
@@ -329,7 +331,10 @@ pub(crate) async fn admin_put_config(
     }
 
     // Hot-reload: sync accounts from the new config
-    state.adapter.sync_accounts(&new_config.accounts).await;
+    state
+        .adapter
+        .sync_accounts(&new_config.ds_core.accounts)
+        .await;
     json_response(&serde_json::json!({"ok": true}))
 }
 

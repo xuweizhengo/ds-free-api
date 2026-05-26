@@ -20,7 +20,7 @@ mod tests {
     };
 
     fn default_registry() -> std::collections::HashMap<String, String> {
-        crate::config::DeepSeekConfig::default().model_registry()
+        crate::config::DsCoreSection::default().model_registry()
     }
 
     /// 测试用的 prepare，模拟 adapter 内部的解析逻辑

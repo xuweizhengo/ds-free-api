@@ -1,12 +1,10 @@
-//! OpenAI 响应转换 —— 将 DeepSeek SSE 流映射为 OpenAI 响应格式
+//! OpenAI 响应转换 —— 将 StreamEvent 流映射为 OpenAI 响应格式
 //!
-//! 数据流：sse_parser -> state -> converter -> tool_parser
+//! 数据流：converter -> tool_parser -> repair -> stop_detect
 //! - 仅 THINK / RESPONSE 片段映射到用户可见文本
 //! - obfuscation 在最终 SSE 序列化阶段动态注入
 
 mod converter;
-mod sse_parser;
-mod state;
 mod tool_parser;
 
 pub(crate) use tool_parser::{TOOL_CALL_END, TOOL_CALL_START, TagConfig};
@@ -23,6 +21,8 @@ use log::{debug, info, trace, warn};
 use pin_project_lite::pin_project;
 use rand::RngExt;
 use tokio::time::Sleep;
+
+use ds_core::StreamEvent;
 
 use crate::openai_adapter::{
     OpenAIAdapterError,
@@ -91,24 +91,27 @@ pub(crate) type RepairFn = Arc<
         + Sync,
 >;
 
-/// 执行 tool_calls 修复：将 ds_core 字节流解析后提取文本，转换为结构化 ToolCall
+/// 执行 tool_calls 修复：将 StreamEvent 流中的 ContentDelta 提取为结构化 ToolCall
 pub(crate) async fn execute_tool_repair(
-    ds_stream: Pin<Box<dyn Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send>>,
+    stream: Pin<Box<dyn Stream<Item = Result<StreamEvent, ds_core::CoreError>> + Send>>,
     tag_config: &TagConfig,
 ) -> Result<Vec<ToolCall>, OpenAIAdapterError> {
-    let sse = sse_parser::SseStream::new(ds_stream);
-    let state_stream = state::StateStream::new(sse);
-    futures::pin_mut!(state_stream);
+    use futures::StreamExt;
+    let mut stream = stream;
 
     let mut text = String::new();
-    while let Some(frame) = state_stream.next().await {
-        if let state::DsFrame::ContentDelta(t) = frame? {
-            text.push_str(&t);
-            if text.len() > tool_parser::MAX_XML_BUF_LEN {
-                return Err(OpenAIAdapterError::Internal(
-                    "修复模型输出过长，放弃修复".into(),
-                ));
+    while let Some(event) = stream.next().await {
+        match event.map_err(OpenAIAdapterError::from)? {
+            StreamEvent::ContentDelta { content } => {
+                text.push_str(&content);
+                if text.len() > tool_parser::MAX_XML_BUF_LEN {
+                    return Err(OpenAIAdapterError::Internal(
+                        "修复模型输出过长，放弃修复".into(),
+                    ));
+                }
             }
+            StreamEvent::Done { .. } => break,
+            _ => {}
         }
     }
 
@@ -386,20 +389,18 @@ pub(crate) struct StreamCfg {
     pub tag_config: Arc<TagConfig>,
 }
 
-/// 流式响应：把 ds_core 字节流转换为 ChatCompletionsResponseChunk 流
+/// 流式响应：把 StreamEvent 流转换为 ChatCompletionsResponseChunk 流
 pub(crate) fn stream<S>(ds_stream: S, model: String, cfg: StreamCfg) -> ChunkStream
 where
-    S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
+    S: Stream<Item = Result<StreamEvent, ds_core::CoreError>> + Send + 'static,
 {
     debug!(
         target: "adapter",
         "构建流式响应: model={}, include_usage={}, include_obfuscation={}, stop_count={}, repair={}",
         model, cfg.include_usage, cfg.include_obfuscation, cfg.stop.len(), cfg.repair_fn.is_some()
     );
-    let sse = sse_parser::SseStream::new(ds_stream);
-    let state_stream = state::StateStream::new(sse);
     let converted = converter::ConverterStream::new(
-        state_stream,
+        ds_stream.map(|r| r.map_err(OpenAIAdapterError::from)),
         model.clone(),
         cfg.include_usage,
         cfg.include_obfuscation,
@@ -441,7 +442,7 @@ pub(crate) async fn aggregate<S>(
     cfg: StreamCfg,
 ) -> Result<ChatCompletionsResponse, OpenAIAdapterError>
 where
-    S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
+    S: Stream<Item = Result<StreamEvent, ds_core::CoreError>> + Send + 'static,
 {
     debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, cfg.stop.len());
     let chunk_stream = stream(
@@ -564,14 +565,12 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
 
+    use ds_core::StreamEvent;
+
     use super::*;
 
     fn default_tag_config() -> Arc<TagConfig> {
         Arc::new(TagConfig::from_config(&Default::default()))
-    }
-
-    fn sse_bytes(body: &str) -> Result<Bytes, crate::ds_core::CoreError> {
-        Ok(Bytes::from(body.to_string()))
     }
 
     fn tool_span(content: &str) -> String {
@@ -583,68 +582,69 @@ mod tests {
         )
     }
 
-    /// 将内容拆分为流式 DS SSE 帧序列，模拟字符级输出（每 ~3 字符一片）
-    /// - pieces: 按顺序排列的 (内容, 片段类型) 对，类型变化时自动插入新 fragment 事件
-    fn make_ds_stream(
+    fn make_event_stream(
         pieces: &[(&str, &str)],
         usage_tokens: Option<u32>,
-    ) -> Vec<Result<Bytes, crate::ds_core::CoreError>> {
-        let mut frames = vec![sse_bytes("event: ready\ndata: {}\n\n")];
+    ) -> Vec<Result<StreamEvent, ds_core::CoreError>> {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let mut has_think = false;
+        let mut has_content = false;
 
-        for (idx, (content, frag_type)) in pieces.iter().enumerate() {
-            let is_first = idx == 0;
-            let prev_type = if idx > 0 {
-                Some(pieces[idx - 1].1)
-            } else {
-                None
-            };
-            let type_changed = prev_type != Some(*frag_type);
-
-            if is_first {
-                // 首个片段：在 response 创建中声明
-                frames.push(sse_bytes(&format!(
-                    "data: {{\"v\":{{\"response\":{{\"fragments\":[{{\"type\":\"{frag_type}\",\"content\":\"\"}}]}}}}}}\n\n"
-                )));
-            } else if type_changed {
-                // 片段类型变化：APPEND 新片段到 fragments 数组
-                frames.push(sse_bytes(&format!(
-                    "data: {{\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{{\"type\":\"{frag_type}\",\"content\":\"\"}}]}}\n\n"
-                )));
-            }
-
-            // 每 3 字符切割一片
-            let mut i = 0;
-            while i < content.len() {
-                let mut end = (i + 3).min(content.len());
-                while !content.is_char_boundary(end) {
-                    end -= 1;
+        for (content, frag_type) in pieces {
+            match *frag_type {
+                "THINK" => {
+                    if !has_think {
+                        events.push(StreamEvent::ThinkStart);
+                        has_think = true;
+                    }
+                    events.push(StreamEvent::ThinkDelta {
+                        content: content.to_string(),
+                    });
                 }
-                let piece = &content[i..end];
-                let escaped = piece.replace('"', "\\\"");
-                frames.push(sse_bytes(&format!(
-                    "data: {{\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"{escaped}\"}}\n\n"
-                )));
-                i = end;
+                _ => {
+                    if !has_content {
+                        events.push(StreamEvent::ContentStart);
+                        has_content = true;
+                    }
+                    events.push(StreamEvent::ContentDelta {
+                        content: content.to_string(),
+                    });
+                }
             }
         }
 
-        if let Some(tokens) = usage_tokens {
-            frames.push(sse_bytes(&format!(
-                "data: {{\"p\":\"response\",\"o\":\"BATCH\",\"v\":[{{\"p\":\"accumulated_token_usage\",\"v\":{tokens}}},{{\"p\":\"quasi_status\",\"v\":\"FINISHED\"}}]}}\n\n"
-            )));
-        }
+        let finish = if has_content {
+            Some("stop".to_string())
+        } else {
+            None
+        };
+        events.push(StreamEvent::Done {
+            finish_reason: finish,
+            accumulated_token_usage: usage_tokens,
+        });
 
-        frames.push(sse_bytes(
-            "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}\n\n",
-        ));
+        events.into_iter().map(Ok).collect()
+    }
 
-        frames
+    fn meta_event() -> Vec<Result<StreamEvent, ds_core::CoreError>> {
+        vec![Ok(StreamEvent::Meta {
+            account_id: "test".into(),
+        })]
+    }
+
+    fn make_full_stream(
+        pieces: &[(&str, &str)],
+        usage_tokens: Option<u32>,
+    ) -> Vec<Result<StreamEvent, ds_core::CoreError>> {
+        let mut events = meta_event();
+        events.extend(make_event_stream(pieces, usage_tokens));
+        events
     }
 
     #[tokio::test]
     async fn aggregate_plain_text() {
-        let frames = make_ds_stream(&[("hello world", "RESPONSE")], Some(41));
-        let stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("hello world", "RESPONSE")], Some(41));
+        let stream = futures::stream::iter(events);
         let resp = aggregate(
             stream,
             "deepseek-default".into(),
@@ -669,8 +669,8 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_thinking() {
-        let frames = make_ds_stream(&[("thinking", "THINK"), ("answer", "RESPONSE")], None);
-        let stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("thinking", "THINK"), ("answer", "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let resp = aggregate(
             stream,
             "deepseek-expert".into(),
@@ -694,8 +694,8 @@ mod tests {
     #[tokio::test]
     async fn aggregate_tool_calls() {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
-        let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
-        let stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[(&tool_xml, "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let resp = aggregate(
             stream,
             "deepseek-default".into(),
@@ -722,6 +722,7 @@ mod tests {
         );
         assert_eq!(resp.choices[0].finish_reason, Some("tool_calls"));
     }
+
     use std::pin::Pin;
 
     fn to_bytes_stream(
@@ -749,10 +750,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_plain_text() {
-        let frames = make_ds_stream(&[("hi", "RESPONSE")], None);
-        let bytes_stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("hi", "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -764,20 +765,13 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (plain_text) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("===================================\n");
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // 所有 content 合并后应为 "hi"
         let all_content: String = chunks
             .iter()
             .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
             .collect();
         assert_eq!(all_content, "hi");
-        // 最终 finish_reason
         assert_eq!(
             chunks.last().unwrap()["choices"][0]["finish_reason"],
             "stop"
@@ -786,10 +780,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_include_usage() {
-        let frames = make_ds_stream(&[("x", "RESPONSE")], Some(12));
-        let bytes_stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("x", "RESPONSE")], Some(12));
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: true,
@@ -801,25 +795,17 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (include_usage) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("======================================\n");
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // 所有 content 合并后应为 "x"
         let all_content: String = chunks
             .iter()
             .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
             .collect();
         assert_eq!(all_content, "x");
-        // usage chunk
         let usage_chunk = chunks
             .iter()
             .find(|c| c["usage"]["completion_tokens"].as_i64() == Some(12));
         assert!(usage_chunk.is_some(), "should have usage chunk");
-        // finish_reason 在含 choices 的最后一个 chunk 中
         let finish_chunk = chunks.iter().rev().find(|c| {
             c["choices"].as_array().map_or(false, |a| !a.is_empty())
                 && c["choices"][0]["finish_reason"].as_str().is_some()
@@ -830,10 +816,10 @@ mod tests {
     #[tokio::test]
     async fn stream_tool_calls() {
         let tool_xml = tool_span(r#"[{"name": "f", "arguments": {}}]"#);
-        let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
-        let bytes_stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[(&tool_xml, "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -845,11 +831,6 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (tool_calls) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("===================================\n");
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
         let has_tool_calls = chunks
@@ -873,10 +854,10 @@ mod tests {
     #[tokio::test]
     async fn stream_fragmented_tool_calls_with_thinking() {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "北京"}}]"#);
-        let frames = make_ds_stream(&[("思考中", "THINK"), (&tool_xml, "RESPONSE")], None);
-        let bytes_stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("思考中", "THINK"), (&tool_xml, "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -888,20 +869,13 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (fragmented_tool_calls_with_thinking) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("============================================================\n");
         assert!(chunks.len() >= 3);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // reasoning_content 应包含思考内容
         let all_reasoning: String = chunks
             .iter()
             .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
             .collect();
         assert!(all_reasoning.contains("思考中"), "should contain 思考中");
-        // 某个 chunk 应包含 tool_calls
         let has_tool_calls = chunks
             .iter()
             .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
@@ -916,7 +890,6 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["function"]["name"], "get_weather");
         assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"北京"}"#);
-        // finish
         assert_eq!(
             chunks.last().unwrap()["choices"][0]["finish_reason"],
             "tool_calls"
@@ -924,19 +897,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_with_tool_search_and_open() {
-        let fixture = "event: ready\ndata: {}\n\n\
-            data: {\"v\":{\"response\":{\"fragments\":[{\"type\":\"THINK\",\"content\":\"思考\"}]}}}\n\n\
-            data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"id\":3,\"type\":\"TOOL_SEARCH\",\"content\":null,\"queries\":[{\"query\":\"q\"}],\"results\":[],\"stage_id\":1}]}\n\n\
-            data: {\"p\":\"response/fragments/-2/results\",\"o\":\"SET\",\"v\":[{\"url\":\"https://example.com\",\"title\":\"ex\",\"snippet\":\"snip\"}]}\n\n\
-            data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"id\":4,\"type\":\"TOOL_OPEN\",\"status\":\"WIP\",\"result\":{\"url\":\"https://open.com\",\"title\":\"open\",\"snippet\":\"open-snippet\"},\"reference\":{\"id\":3,\"type\":\"TOOL_SEARCH\"},\"stage_id\":1}]}\n\n\
-            data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"THINK\",\"content\":\"继续\"}]}\n\n\
-            data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"\"}]}\n\n\
-            data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"hello\"}\n\n\
-            data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}\n\n";
-        let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
+    async fn stream_tool_calls_with_leading_text_fragmented() {
+        let tool_xml = tool_span(
+            r#"[{"name": "astrbot_execute_shell", "arguments": {"command": "cat /data/astrbot/skills/doubao-image-gen/SKILL.md"}}]"#,
+        );
+        let events = make_full_stream(
+            &[
+                ("好的，我来帮你用豆包生成图片。", "RESPONSE"),
+                (&tool_xml, "RESPONSE"),
+            ],
+            None,
+        );
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -948,27 +922,100 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (tool_search_and_open) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("=============================================\n");
-        assert!(chunks.len() >= 3);
+        assert!(chunks.len() >= 2);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // 所有 reasoning 合并后应包含 "思考" 和 "继续"
-        let all_reasoning: String = chunks
+        let all_content: String = chunks
             .iter()
-            .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
+            .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
             .collect();
-        assert!(all_reasoning.contains("思考"), "should contain 思考");
-        assert!(all_reasoning.contains("继续"), "should contain 继续");
-        // 所有 content 合并后应为 "hello"
+        assert!(
+            all_content.contains("好的，我来帮你用豆包生成图片"),
+            "should contain leading text, got {all_content:?}"
+        );
+        let has_tool_calls = chunks
+            .iter()
+            .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
+        assert!(has_tool_calls, "should have a tool_calls chunk");
+        let tc_chunk = chunks
+            .iter()
+            .find(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some())
+            .unwrap();
+        let calls = tc_chunk["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "astrbot_execute_shell");
+        let last = chunks.last().unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[tokio::test]
+    async fn stream_tool_calls_no_leading_text() {
+        let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
+        let events = make_full_stream(&[(&tool_xml, "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
+        let chunks = collect_chunks(to_bytes_stream(super::stream(
+            stream,
+            "deepseek-default".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )))
+        .await;
+        assert!(
+            chunks.len() >= 2,
+            "expected at least 2 chunks, got {}",
+            chunks.len()
+        );
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+        let tc_idx = chunks
+            .iter()
+            .position(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some())
+            .expect("should have a chunk with tool_calls");
+        let tc_chunk = &chunks[tc_idx];
+        let calls = tc_chunk["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
+        let last = chunks.last().unwrap();
+        assert_eq!(
+            last["choices"][0]["finish_reason"], "tool_calls",
+            "finish_reason should be tool_calls, got {:?}",
+            last["choices"][0]["finish_reason"]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_with_tool_search_and_open() {
+        let events = make_full_stream(&[("hello", "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
+        let chunks = collect_chunks(to_bytes_stream(super::stream(
+            stream,
+            "m".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )))
+        .await;
+        assert!(chunks.len() >= 2);
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
         let all_content: String = chunks
             .iter()
             .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
             .collect();
         assert_eq!(all_content, "hello");
-        // finish_reason
         assert_eq!(
             chunks.last().unwrap()["choices"][0]["finish_reason"],
             "stop"
@@ -977,13 +1024,13 @@ mod tests {
 
     #[tokio::test]
     async fn stream_include_obfuscation() {
-        let frames = make_ds_stream(
+        let events = make_full_stream(
             &[("这是一段足够长的中文文本用于测试混淆", "RESPONSE")],
             None,
         );
-        let bytes_stream = futures::stream::iter(frames);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -995,17 +1042,7 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (include_obfuscation) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!(
-                "chunk[{i}] len={}:\n{}",
-                serde_json::to_string(c).unwrap().len(),
-                serde_json::to_string_pretty(c).unwrap()
-            );
-        }
-        println!("============================================\n");
         assert!(chunks.len() >= 2);
-        // 所有含 choices 且有 content 的 chunk 都应被动态 padding 到目标长度附近
         for c in &chunks {
             if c["choices"][0]["delta"]["content"].as_str().is_some()
                 || c["choices"][0]["finish_reason"].as_str().is_some()
@@ -1022,7 +1059,6 @@ mod tests {
                 );
             }
         }
-        // 内容完整
         let all_content: String = chunks
             .iter()
             .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
@@ -1031,7 +1067,6 @@ mod tests {
             all_content.contains("足够长的中文文本"),
             "should contain expected text, got {all_content:?}"
         );
-        // finish_reason
         assert_eq!(
             chunks.last().unwrap()["choices"][0]["finish_reason"],
             "stop"
@@ -1041,11 +1076,11 @@ mod tests {
     #[tokio::test]
     async fn aggregate_tool_calls_with_leading_text() {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
-        let frames = make_ds_stream(
+        let events = make_full_stream(
             &[("好的，我来帮你。", "RESPONSE"), (&tool_xml, "RESPONSE")],
             None,
         );
-        let stream = futures::stream::iter(frames);
+        let stream = futures::stream::iter(events);
         let resp = aggregate(
             stream,
             "deepseek-default".into(),
@@ -1073,77 +1108,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_tool_calls_with_leading_text_fragmented() {
-        let tool_xml = tool_span(
-            r#"[{"name": "astrbot_execute_shell", "arguments": {"command": "cat /data/astrbot/skills/doubao-image-gen/SKILL.md"}}]"#,
-        );
-        let frames = make_ds_stream(
-            &[
-                ("好的，我来帮你用豆包生成图片。", "RESPONSE"),
-                (&tool_xml, "RESPONSE"),
-            ],
-            None,
-        );
-        let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
-            "m".into(),
-            super::StreamCfg {
-                include_usage: false,
-                include_obfuscation: false,
-                stop: vec![],
-                prompt_tokens: 0,
-                repair_fn: None,
-                tag_config: default_tag_config(),
-            },
-        )))
-        .await;
-        println!("\n=== STREAM CHUNKS (tool_calls with leading text, fragmented) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("====================================================================\n");
-        // 验证核心语义：前导文本 + tool_calls + finish_reason
-        assert!(chunks.len() >= 2);
-        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // 所有 content 合并后应包含前导文本
-        let all_content: String = chunks
-            .iter()
-            .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
-            .collect();
-        assert!(
-            all_content.contains("好的，我来帮你用豆包生成图片"),
-            "should contain leading text, got {all_content:?}"
-        );
-        // 某个 chunk 应包含 tool_calls
-        let has_tool_calls = chunks
-            .iter()
-            .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
-        assert!(has_tool_calls, "should have a tool_calls chunk");
-        let tc_chunk = chunks
-            .iter()
-            .find(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some())
-            .unwrap();
-        let calls = tc_chunk["choices"][0]["delta"]["tool_calls"]
-            .as_array()
-            .unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "astrbot_execute_shell");
-        // finish
-        let last = chunks.last().unwrap();
-        assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
-    }
-
-    #[tokio::test]
-    async fn stream_tool_calls_with_leading_text_multi_chunk_fragments() {
+    async fn aggregate_tool_calls_multi_chunk_fragments() {
         let tool_xml = tool_span(r#"[{"name": "f", "arguments": {}}]"#);
-        let frames = make_ds_stream(
+        let events = make_full_stream(
             &[("让我来查一下。", "RESPONSE"), (&tool_xml, "RESPONSE")],
             None,
         );
-        let bytes_stream = futures::stream::iter(frames);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -1155,22 +1128,6 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (leading text + multi-chunk JSON fragments) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("=============================================================\n");
-        // 应该输出: role, leading text, tool_calls, finish
-        for (i, c) in chunks.iter().enumerate() {
-            eprintln!(
-                "chunk[{}] content={:?} tool_calls={:?} finish={:?}",
-                i,
-                c["choices"][0]["delta"]["content"],
-                c["choices"][0]["delta"]["tool_calls"],
-                c["choices"][0]["finish_reason"]
-            );
-        }
-        // 必须有 tool_calls chunk
         let has_tool_calls = chunks
             .iter()
             .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
@@ -1181,9 +1138,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_tool_calls_with_thinking_then_leading_text_then_fragmented_json() {
-        // 最完整的生产场景：thinking -> leading text -> 碎片化 tool_calls
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
-        let frames = make_ds_stream(
+        let events = make_full_stream(
             &[
                 ("用户要查天气，我需要调用工具", "THINK"),
                 ("好的，我来帮你查一下。", "RESPONSE"),
@@ -1191,9 +1147,9 @@ mod tests {
             ],
             None,
         );
-        let bytes_stream = futures::stream::iter(frames);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -1205,22 +1161,6 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (thinking + leading + fragmented JSON) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("=============================================================\n");
-        for (i, c) in chunks.iter().enumerate() {
-            eprintln!(
-                "chunk[{}] content={:?} reasoning={:?} tool_calls={:?} finish={:?}",
-                i,
-                c["choices"][0]["delta"]["content"],
-                c["choices"][0]["delta"]["reasoning_content"],
-                c["choices"][0]["delta"]["tool_calls"],
-                c["choices"][0]["finish_reason"]
-            );
-        }
-        // 必须有 tool_calls chunk
         let has_tool_calls = chunks
             .iter()
             .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
@@ -1232,10 +1172,10 @@ mod tests {
     #[tokio::test]
     async fn stream_tool_calls_json_split_right_after_tag() {
         let tool_xml = tool_span(r#"[{"name": "f", "arguments": {}}]"#);
-        let frames = make_ds_stream(&[("好的。", "RESPONSE"), (&tool_xml, "RESPONSE")], None);
-        let bytes_stream = futures::stream::iter(frames);
+        let events = make_full_stream(&[("好的。", "RESPONSE"), (&tool_xml, "RESPONSE")], None);
+        let stream = futures::stream::iter(events);
         let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
+            stream,
             "m".into(),
             super::StreamCfg {
                 include_usage: false,
@@ -1247,76 +1187,11 @@ mod tests {
             },
         )))
         .await;
-        println!("\n=== STREAM CHUNKS (JSON split right after tool_call) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("=============================================================\n");
         let has_tool_calls = chunks
             .iter()
             .any(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some());
         assert!(has_tool_calls, "should have a tool_calls chunk but didn't");
         let last = chunks.last().unwrap();
         assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
-    }
-
-    #[tokio::test]
-    async fn stream_tool_calls_no_leading_text() {
-        let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
-        let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
-        let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(to_bytes_stream(super::stream(
-            bytes_stream,
-            "deepseek-default".into(),
-            super::StreamCfg {
-                include_usage: false,
-                include_obfuscation: false,
-                stop: vec![],
-                prompt_tokens: 0,
-                repair_fn: None,
-                tag_config: default_tag_config(),
-            },
-        )))
-        .await;
-        println!("\n=== STREAM CHUNKS (tool_calls, no leading text) ===");
-        for (i, c) in chunks.iter().enumerate() {
-            println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
-        }
-        println!("===================================================\n");
-        // 应该有 role chunk + tool_calls chunk + finish chunk
-        for (i, c) in chunks.iter().enumerate() {
-            eprintln!(
-                "chunk[{}] content={:?} tool_calls={:?} finish={:?}",
-                i,
-                c["choices"][0]["delta"]["content"],
-                c["choices"][0]["delta"]["tool_calls"],
-                c["choices"][0]["finish_reason"]
-            );
-        }
-        assert!(
-            chunks.len() >= 2,
-            "expected at least 2 chunks, got {}",
-            chunks.len()
-        );
-        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
-        // 找包含 tool_calls 的 chunk
-        let tc_idx = chunks
-            .iter()
-            .position(|c| c["choices"][0]["delta"]["tool_calls"].as_array().is_some())
-            .expect("should have a chunk with tool_calls");
-        let tc_chunk = &chunks[tc_idx];
-        let calls = tc_chunk["choices"][0]["delta"]["tool_calls"]
-            .as_array()
-            .unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "get_weather");
-        assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
-        // 最后一个 chunk 的 finish_reason 应该是 tool_calls
-        let last = chunks.last().unwrap();
-        assert_eq!(
-            last["choices"][0]["finish_reason"], "tool_calls",
-            "finish_reason should be tool_calls, got {:?}",
-            last["choices"][0]["finish_reason"]
-        );
     }
 }

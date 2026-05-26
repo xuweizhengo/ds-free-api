@@ -11,9 +11,9 @@ use futures::TryStreamExt;
 use log::{debug, error, info, warn};
 use tokio::sync::RwLock;
 
-use crate::config::Account as AccountConfig;
-use crate::ds_core::client::{ClientError, CompletionPayload, DsClient, LoginPayload};
-use crate::ds_core::pow::{PowError, PowSolver};
+use super::client::{ClientError, CompletionPayload, DsClient, LoginPayload};
+use super::pow::{PowError, PowSolver};
+use crate::config::AccountConfig;
 
 /// 账号状态枚举
 #[repr(u8)]
@@ -35,7 +35,7 @@ impl AccountState {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Busy => "busy",

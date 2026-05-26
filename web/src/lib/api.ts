@@ -159,7 +159,15 @@ export interface ToolCallTagConfig {
   extra_ends: string[];
 }
 
-export interface DeepSeekConfig {
+export interface AccountEntry {
+  email: string;
+  mobile: string;
+  area_code: string;
+  password: string;
+}
+
+export interface DsCoreConfig {
+  accounts: AccountEntry[];
   api_base: string;
   wasm_url: string;
   user_agent: string;
@@ -183,13 +191,6 @@ export interface AdminConfigResponse {
   jwt_issued_at: number;
 }
 
-export interface AccountEntry {
-  email: string;
-  mobile: string;
-  area_code: string;
-  password: string;
-}
-
 export interface ApiKeyEntry {
   key: string;
   description: string;
@@ -197,10 +198,9 @@ export interface ApiKeyEntry {
 
 export interface FullConfig {
   server: ServerConfig;
-  deepseek: DeepSeekConfig;
+  ds_core: DsCoreConfig;
   proxy: ProxyConfig;
   admin: AdminConfigResponse;
-  accounts: AccountEntry[];
   api_keys: ApiKeyEntry[];
 }
 

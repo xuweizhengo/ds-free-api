@@ -9,12 +9,8 @@ use std::path::{Path, PathBuf};
 /// 应用配置根结构
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// 账号池（必需，可为空——启动后通过管理面板添加）
-    #[serde(default)]
-    pub accounts: Vec<Account>,
-    /// DeepSeek 相关配置
-    #[serde(default)]
-    pub deepseek: DeepSeekConfig,
+    /// DeepSeek 核心配置（账号、客户端、模型等）
+    pub ds_core: DsCoreSection,
     /// HTTP 服务器配置（必填）
     pub server: ServerConfig,
     /// 代理配置（可选，用于绕过 WAF）
@@ -26,6 +22,68 @@ pub struct Config {
     /// API Key 列表（由管理面板管理）
     #[serde(default)]
     pub api_keys: Vec<ApiKeyEntry>,
+}
+
+/// DeepSeek 核心配置段 —— 对应 config.toml 的 [ds_core]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DsCoreSection {
+    /// 账号池（必需，可为空——启动后通过管理面板添加）
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    /// API 基础地址
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
+    /// WASM 文件完整 URL（PoW 计算所需，版本号可能变动）
+    #[serde(default = "default_wasm_url")]
+    pub wasm_url: String,
+    /// User-Agent 请求头
+    #[serde(default = "default_user_agent")]
+    pub user_agent: String,
+    /// X-Client-Version 请求头（用于 expert 模型等功能）
+    #[serde(default = "default_client_version")]
+    pub client_version: String,
+    /// X-Client-Platform 请求头
+    #[serde(default = "default_client_platform")]
+    pub client_platform: String,
+    /// X-Client-Locale 请求头
+    #[serde(default = "default_client_locale")]
+    pub client_locale: String,
+    /// 定义支持的模型类型列表，每种类型会自动映射为 OpenAI 的 model_id：deepseek-<type>
+    #[serde(default = "default_model_types")]
+    pub model_types: Vec<String>,
+    /// 各模型类型的输入 token 限制（与 model_types 按索引一一对应）
+    #[serde(default = "default_max_input_tokens")]
+    pub max_input_tokens: Vec<u32>,
+    /// 各模型类型的输出 token 限制（与 model_types 按索引一一对应）
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: Vec<u32>,
+    /// 各模型类型的单次输入字符数限制（与 model_types 按索引一一对应）
+    #[serde(default = "default_input_character_limits")]
+    pub input_character_limits: Vec<u32>,
+    /// 模型别名：按 index 对齐 model_types，默认无别名
+    #[serde(default)]
+    pub model_aliases: Vec<String>,
+    /// 工具调用标签配置（自定义回退标签）
+    #[serde(default)]
+    pub tool_call: ToolCallTagConfig,
+}
+
+impl DsCoreSection {
+    /// 生成 OpenAI 模型注册表映射
+    #[must_use]
+    pub fn model_registry(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for (i, ty) in self.model_types.iter().enumerate() {
+            map.insert(format!("deepseek-{}", ty).to_lowercase(), ty.clone());
+            if let Some(alias) = self.model_aliases.get(i) {
+                let alias = alias.trim().to_lowercase();
+                if !alias.is_empty() {
+                    map.insert(alias, ty.clone());
+                }
+            }
+        }
+        map
+    }
 }
 
 /// Admin 配置
@@ -55,13 +113,6 @@ pub struct ApiKeyEntry {
     pub description: String,
 }
 
-/// 代理配置
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ProxyConfig {
-    /// 代理 URL，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891
-    pub url: Option<String>,
-}
-
 /// 单个账号配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Account {
@@ -75,55 +126,14 @@ pub struct Account {
     pub password: String,
 }
 
-/// DeepSeek 客户端配置
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DeepSeekConfig {
-    /// API 基础地址
-    #[serde(default = "default_api_base")]
-    pub api_base: String,
-    /// WASM 文件完整 URL（PoW 计算所需，版本号可能变动）
-    #[serde(default = "default_wasm_url")]
-    pub wasm_url: String,
-    /// User-Agent 请求头
-    #[serde(default = "default_user_agent")]
-    pub user_agent: String,
-    /// X-Client-Version 请求头（用于 expert 模型等功能）
-    #[serde(default = "default_client_version")]
-    pub client_version: String,
-    /// X-Client-Platform 请求头
-    #[serde(default = "default_client_platform")]
-    pub client_platform: String,
-    /// X-Client-Locale 请求头
-    #[serde(default = "default_client_locale")]
-    pub client_locale: String,
-    /// 定义支持的模型类型列表，每种类型会自动映射为 OpenAI 的 model_id：deepseek-<type>
-    #[serde(default = "default_model_types")]
-    pub model_types: Vec<String>,
-    /// 各模型类型的输入 token 限制（与 model_types 按索引一一对应）
-    #[serde(default = "default_max_input_tokens")]
-    pub max_input_tokens: Vec<u32>,
-    /// 各模型类型的输出 token 限制（与 model_types 按索引一一对应）
-    #[serde(default = "default_max_output_tokens")]
-    pub max_output_tokens: Vec<u32>,
-    /// 各模型类型的单次输入字符数限制（与 model_types 按索引一一对应）
-    /// 超过此限制时，expert 模型会触发分块循环写入 session，其他模型会自动退回内联发送
-    #[serde(default = "default_input_character_limits")]
-    pub input_character_limits: Vec<u32>,
-    /// 工具调用标签配置（自定义回退标签）
-    #[serde(default)]
-    pub tool_call: ToolCallTagConfig,
-    /// 模型别名：按 index 对齐 model_types，默认无别名
-    /// 如 model_types = ["default", "expert"], model_aliases = ["", "deepseek-v4-pro"]
-    /// 则仅 deepseek-v4-pro → expert（index 1），空字符串被跳过
-    #[serde(default)]
-    pub model_aliases: Vec<String>,
+/// 代理配置
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ProxyConfig {
+    /// 代理 URL，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891
+    pub url: Option<String>,
 }
 
 /// 工具调用标签配置
-///
-/// 内置模糊匹配：`｜`(U+FF5C)↔`|`、`▁`(U+2581)↔`_`，自动覆盖大多数字符级幻觉变体。
-/// 此处配置的 extra 列表用于处理格式完全不同的标签（如 `<tool_call>`），
-/// 模糊匹配无法覆盖的情况。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolCallTagConfig {
     /// 额外开始标签（内置 `<|tool▁calls▁begin|>` + 模糊匹配，此处只加格式完全不同的变体）
@@ -143,6 +153,8 @@ impl Default for ToolCallTagConfig {
     }
 }
 
+// ── 默认值函数 ──────────────────────────────────────────────────────────
+
 fn default_tool_call_starts() -> Vec<String> {
     vec![
         "<|tool_call_begin|>".into(),
@@ -157,25 +169,6 @@ fn default_tool_call_ends() -> Vec<String> {
         "</tool_calls>".into(),
         "</tool_call>".into(),
     ]
-}
-
-impl Default for DeepSeekConfig {
-    fn default() -> Self {
-        Self {
-            api_base: default_api_base(),
-            wasm_url: default_wasm_url(),
-            user_agent: default_user_agent(),
-            client_version: default_client_version(),
-            client_platform: default_client_platform(),
-            client_locale: default_client_locale(),
-            model_types: default_model_types(),
-            max_input_tokens: default_max_input_tokens(),
-            max_output_tokens: default_max_output_tokens(),
-            input_character_limits: default_input_character_limits(),
-            tool_call: ToolCallTagConfig::default(),
-            model_aliases: Vec::new(),
-        }
-    }
 }
 
 fn default_model_types() -> Vec<String> {
@@ -198,22 +191,28 @@ fn default_input_character_limits() -> Vec<u32> {
     vec![2_621_440, 163_840, 2_621_440]
 }
 
-impl DeepSeekConfig {
-    /// 生成 OpenAI 模型注册表映射
-    #[must_use]
-    pub fn model_registry(&self) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        for (i, ty) in self.model_types.iter().enumerate() {
-            map.insert(format!("deepseek-{}", ty).to_lowercase(), ty.clone());
-            if let Some(alias) = self.model_aliases.get(i) {
-                let alias = alias.trim().to_lowercase();
-                if !alias.is_empty() {
-                    map.insert(alias, ty.clone());
-                }
-            }
-        }
-        map
-    }
+fn default_api_base() -> String {
+    "https://chat.deepseek.com/api/v0".to_string()
+}
+
+fn default_wasm_url() -> String {
+    "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm".to_string()
+}
+
+fn default_user_agent() -> String {
+    "DeepSeek/2.1.1 Android/35".to_string()
+}
+
+fn default_client_version() -> String {
+    "2.0.0".to_string()
+}
+
+fn default_client_platform() -> String {
+    "android".to_string()
+}
+
+fn default_client_locale() -> String {
+    "zh_CN".to_string()
 }
 
 /// HTTP 服务器配置（必填）
@@ -224,7 +223,6 @@ pub struct ServerConfig {
     /// 监听端口
     pub port: u16,
     /// CORS 允许的 Origin 列表，默认 ["http://localhost:22217"]
-    /// 设为 ["*"] 则允许所有（不推荐生产使用）
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
 }
@@ -233,35 +231,7 @@ fn default_cors_origins() -> Vec<String> {
     vec!["http://localhost:22217".to_string()]
 }
 
-/// 默认 API 基础地址
-fn default_api_base() -> String {
-    "https://chat.deepseek.com/api/v0".to_string()
-}
-
-/// 默认 WASM 文件 URL（版本号可能变动，建议配置文件中显式指定）
-fn default_wasm_url() -> String {
-    "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm".to_string()
-}
-
-/// 默认 User-Agent
-fn default_user_agent() -> String {
-    "DeepSeek/2.0.4 Android/35".to_string()
-}
-
-/// 默认 X-Client-Version
-fn default_client_version() -> String {
-    "2.1.0".to_string()
-}
-
-/// 默认 X-Client-Platform
-fn default_client_platform() -> String {
-    "android".to_string()
-}
-
-/// 默认 X-Client-Locale
-fn default_client_locale() -> String {
-    "zh_CN".to_string()
-}
+// ── Config 实现 ─────────────────────────────────────────────────────────
 
 impl Config {
     /// 从指定路径加载配置
@@ -276,7 +246,7 @@ impl Config {
     /// 按 email（优先）或 mobile 去重，保留首次出现的账号
     fn dedup_accounts(&mut self) {
         let mut seen = std::collections::HashSet::new();
-        self.accounts.retain(|a| {
+        self.ds_core.accounts.retain(|a| {
             let key = if a.email.is_empty() {
                 a.mobile.clone()
             } else {
@@ -287,17 +257,12 @@ impl Config {
     }
 
     /// 解析命令行参数并加载配置
-    ///
-    /// 支持 `-c <path>` 指定配置文件路径，默认使用 `config.toml`
-    /// 也支持 `DS_CONFIG_PATH` 环境变量（优先级：`-c` > `DS_CONFIG_PATH` > 默认值）
-    /// 若文件不存在且非 `-c` 显式指定，自动创建最小配置
-    /// 返回 (加载的配置, 配置文件的路径)
     pub fn load_with_args(
         args: impl Iterator<Item = String>,
     ) -> Result<(Self, PathBuf), ConfigError> {
         let mut explicit_c = false;
         let mut config_path = None;
-        let mut iter = args.skip(1); // 跳过程序名
+        let mut iter = args.skip(1);
 
         while let Some(arg) = iter.next() {
             if arg == "-c" {
@@ -322,10 +287,11 @@ impl Config {
                     format!("指定配置文件不存在: {}", path.display()),
                 )));
             }
-            // 自动创建最小配置
             let default = Config {
-                accounts: Vec::new(),
-                deepseek: DeepSeekConfig::default(),
+                ds_core: DsCoreSection {
+                    accounts: Vec::new(),
+                    ..Default::default()
+                },
                 server: ServerConfig {
                     host: "127.0.0.1".into(),
                     port: 22217,
@@ -349,30 +315,31 @@ impl Config {
         let config = Self::load(&path)?;
         Ok((config, path))
     }
+
     /// 验证配置有效性
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        if self.deepseek.model_types.is_empty() {
+        if self.ds_core.model_types.is_empty() {
             return Err(ConfigError::Validation("model_types 不能为空".to_string()));
         }
-        let n = self.deepseek.model_types.len();
-        if self.deepseek.max_input_tokens.len() != n {
+        let n = self.ds_core.model_types.len();
+        if self.ds_core.max_input_tokens.len() != n {
             return Err(ConfigError::Validation(format!(
                 "max_input_tokens 长度({})必须与 model_types 长度({})一致",
-                self.deepseek.max_input_tokens.len(),
+                self.ds_core.max_input_tokens.len(),
                 n
             )));
         }
-        if self.deepseek.max_output_tokens.len() != n {
+        if self.ds_core.max_output_tokens.len() != n {
             return Err(ConfigError::Validation(format!(
                 "max_output_tokens 长度({})必须与 model_types 长度({})一致",
-                self.deepseek.max_output_tokens.len(),
+                self.ds_core.max_output_tokens.len(),
                 n
             )));
         }
-        if self.deepseek.input_character_limits.len() != n {
+        if self.ds_core.input_character_limits.len() != n {
             return Err(ConfigError::Validation(format!(
                 "input_character_limits 长度({})必须与 model_types 长度({})一致",
-                self.deepseek.input_character_limits.len(),
+                self.ds_core.input_character_limits.len(),
                 n
             )));
         }
@@ -393,6 +360,7 @@ impl Config {
         Ok(())
     }
 
+    /// 原子保存配置到文件
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let toml_str = toml::to_string_pretty(self).map_err(ConfigError::TomlSerialization)?;
         let tmp = path.as_ref().with_extension("toml.tmp");
@@ -405,6 +373,26 @@ impl Config {
             std::fs::set_permissions(path.as_ref(), perms)?;
         }
         Ok(())
+    }
+}
+
+impl Default for DsCoreSection {
+    fn default() -> Self {
+        Self {
+            accounts: Vec::new(),
+            api_base: default_api_base(),
+            wasm_url: default_wasm_url(),
+            user_agent: default_user_agent(),
+            client_version: default_client_version(),
+            client_platform: default_client_platform(),
+            client_locale: default_client_locale(),
+            model_types: default_model_types(),
+            max_input_tokens: default_max_input_tokens(),
+            max_output_tokens: default_max_output_tokens(),
+            input_character_limits: default_input_character_limits(),
+            model_aliases: Vec::new(),
+            tool_call: ToolCallTagConfig::default(),
+        }
     }
 }
 

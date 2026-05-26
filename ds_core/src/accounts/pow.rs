@@ -6,7 +6,7 @@
 use wasmtime::{AsContextMut, Engine, InstancePre, Linker, Module, Store, ValType};
 
 // 复用 client 的 ChallengeData，避免重复定义
-pub use crate::ds_core::client::ChallengeData as Challenge;
+pub use super::client::ChallengeData as Challenge;
 
 #[derive(Clone)]
 pub struct PowSolver {
@@ -168,6 +168,7 @@ impl PowSolver {
             .map_err(|e| PowError::Execution(e.to_string()))?;
 
         let prefix = format!("{}_{}_", challenge.salt, challenge.expire_at);
+
         let retptr = add_to_stack
             .call(&mut store, -16)
             .map_err(|e| PowError::Execution(e.to_string()))?;
@@ -206,10 +207,6 @@ impl PowSolver {
             .map_err(|e| PowError::Execution(e.to_string()))?;
         let value = f64::from_le_bytes(value_buf);
 
-        add_to_stack
-            .call(&mut store, 16)
-            .map_err(|e| PowError::Execution(e.to_string()))?;
-
         if status == 0 {
             return Err(PowError::NoSolution);
         }
@@ -225,14 +222,16 @@ impl PowSolver {
     }
 }
 
+// ── WASM 辅助函数 ──────────────────────────────────────────────────────
+
 fn write_string(
-    store: &mut Store<()>,
+    store: &mut impl AsContextMut,
     memory: &wasmtime::Memory,
     alloc: &wasmtime::TypedFunc<(i32, i32), i32>,
-    text: &str,
+    s: &str,
 ) -> Result<(i32, i32), PowError> {
-    let bytes = text.as_bytes();
-    let len = i32::try_from(bytes.len()).expect("bytes length exceeds i32::MAX");
+    let bytes = s.as_bytes();
+    let len = bytes.len() as i32;
     let ptr = alloc
         .call(store.as_context_mut(), (len, 1))
         .map_err(|e| PowError::Execution(e.to_string()))?;
@@ -242,8 +241,32 @@ fn write_string(
     Ok((ptr, len))
 }
 
-fn matches_sig(export: &wasmtime::ExportType<'_>, params: &[ValType], results: &[ValType]) -> bool {
-    let ext_ty = export.ty();
+fn find_export_by_names(
+    exports: &[wasmtime::ExportType],
+    names: &[&str],
+    params: &[ValType],
+    results: &[ValType],
+) -> Option<String> {
+    exports
+        .iter()
+        .find(|e| names.contains(&e.name()) && matches_sig(e, params, results))
+        .map(|e| e.name().to_string())
+}
+
+fn find_export_by_prefix(
+    exports: &[wasmtime::ExportType],
+    prefix: &str,
+    params: &[ValType],
+    results: &[ValType],
+) -> Option<String> {
+    exports
+        .iter()
+        .find(|e| e.name().starts_with(prefix) && matches_sig(e, params, results))
+        .map(|e| e.name().to_string())
+}
+
+fn matches_sig(e: &wasmtime::ExportType, params: &[ValType], results: &[ValType]) -> bool {
+    let ext_ty = e.ty();
     let Some(func_ty) = ext_ty.func() else {
         return false;
     };
@@ -257,33 +280,4 @@ fn matches_sig(export: &wasmtime::ExportType<'_>, params: &[ValType], results: &
         && r.iter()
             .zip(results.iter())
             .all(|(a, b)| std::mem::discriminant(a) == std::mem::discriminant(b))
-}
-
-fn find_export_by_names(
-    exports: &[wasmtime::ExportType<'_>],
-    names: &[&str],
-    params: &[ValType],
-    results: &[ValType],
-) -> Option<String> {
-    for name in names {
-        if let Some(export) = exports.iter().find(|e| e.name() == *name)
-            && matches_sig(export, params, results)
-        {
-            return Some(name.to_string());
-        }
-    }
-    None
-}
-
-fn find_export_by_prefix(
-    exports: &[wasmtime::ExportType<'_>],
-    prefix: &str,
-    params: &[ValType],
-    results: &[ValType],
-) -> Option<String> {
-    exports
-        .iter()
-        .filter(|e| e.name().starts_with(prefix))
-        .find(|e| matches_sig(e, params, results))
-        .map(|e| e.name().to_string())
 }
