@@ -1,22 +1,24 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/logo.svg" width="81" height="66">
+  <img src="assets/logo.svg" width="81" height="66">
 </p>
 
-<h1 align="center">DS-Free-API</h1>
+<h1 align="center">DeepSeek Web API Gateway</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/NIyueeE/ds-free-api.svg"></a>
-  <img src="https://img.shields.io/github/v/release/NIyueeE/ds-free-api.svg">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/ds-free-api.svg"></a>
+  <img src="https://img.shields.io/github/v/release/xuweizhengo/ds-free-api.svg">
   <img src="https://img.shields.io/badge/rust-1.95.0+-93450a.svg">
-  <img src="https://github.com/NIyueeE/ds-free-api/actions/workflows/ci.yml/badge.svg">
+  <img src="https://github.com/xuweizhengo/ds-free-api/actions/workflows/ci.yml/badge.svg">
 </p>
 <p align="center">
-  <img src="https://img.shields.io/github/stars/NIyueeE/ds-free-api.svg">
-  <img src="https://img.shields.io/github/forks/NIyueeE/ds-free-api.svg">
-  <img src="https://img.shields.io/github/last-commit/NIyueeE/ds-free-api.svg">
+  <img src="https://img.shields.io/github/stars/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/forks/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/last-commit/xuweizhengo/ds-free-api.svg">
 </p>
 
 [English](README.en.md)
+
+> Fork 说明：本项目基于 [NIyueeE/ds-free-api](https://github.com/NIyueeE/ds-free-api) 二次整理，遵循 GPL-3.0 协议。当前 fork 主要用于文档、部署入口和个人维护版本整理。
 
 将免费的 DeepSeek 网页端对话反代并适配转换为标准的 OpenAI 与 Anthropic 兼容 API 协议（目前支持 chat completions 和 messages，包括流式返回与工具调用）。
 
@@ -36,7 +38,7 @@
 
 ### 二进制使用
 
-1. 从 [releases](https://github.com/NIyueeE/ds-free-api/releases) 下载对应平台压缩包并解压
+1. 从 [releases](https://github.com/xuweizhengo/ds-free-api/releases) 下载对应平台压缩包并解压
 2. 复制 `config.example.toml` 为 `config.toml` 并填入账号 (可选, 也可启动后在管理面板中配置)
 3. 运行 `./ds-free-api`
 4. 访问 `http://127.0.0.1:22217/admin` 设置管理密码，之后可在面板中创建 API Key 和管理账号
@@ -63,7 +65,7 @@ Compose 配置见 [docker/docker-compose.yaml](./docker/docker-compose.yaml)。
 
 ### 免费测试账号
 
-请自行注册，可以参考 [issue #62](https://github.com/NIyueeE/ds-free-api/issues/62) 的方法。
+请自行注册。历史讨论可参考上游 [issue #62](https://github.com/NIyueeE/ds-free-api/issues/62)。
 
 ## API 端点
 
@@ -139,13 +141,13 @@ tool_call.extra_ends = ["<|tool_call_end|>", "</tool_calls>", "</tool_call>"]
 - **日志**：最近请求日志与运行时日志
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/web_p1.png" alt="管理面板概览" width="700">
+  <img src="assets/web_p1.png" alt="管理面板概览" width="700">
   <br>
   <em>管理面板概览（Dashboard）</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/web_p2.png" alt="配置界面" width="700">
+  <img src="assets/web_p2.png" alt="配置界面" width="700">
   <br>
   <em>配置界面（Config）</em>
 </p>

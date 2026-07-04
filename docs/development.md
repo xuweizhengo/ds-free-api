@@ -58,7 +58,7 @@ build-frontend (bun install --frozen-lockfile + bun run build)
 `build-frontend` 产出 `web-dist` artifact，各编译 job 下载后再执行 `cargo build` /
 `cross build`，保证 `rust_embed` 嵌入真实前端文件。
 
-Docker 镜像自动推送到 `ghcr.io/niyueee/ds-free-api:latest`。
+Docker 镜像自动推送到 `ghcr.io/xuweizhengo/ds-free-api:latest`。
 
 ## Docker 部署（生产）
 

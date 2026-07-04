@@ -1,22 +1,24 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/logo.svg" width="81" height="66">
+  <img src="assets/logo.svg" width="81" height="66">
 </p>
 
-<h1 align="center">DS-Free-API</h1>
+<h1 align="center">DeepSeek Web API Gateway</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/NIyueeE/ds-free-api.svg"></a>
-  <img src="https://img.shields.io/github/v/release/NIyueeE/ds-free-api.svg">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/ds-free-api.svg"></a>
+  <img src="https://img.shields.io/github/v/release/xuweizhengo/ds-free-api.svg">
   <img src="https://img.shields.io/badge/rust-1.95.0+-93450a.svg">
-  <img src="https://github.com/NIyueeE/ds-free-api/actions/workflows/ci.yml/badge.svg">
+  <img src="https://github.com/xuweizhengo/ds-free-api/actions/workflows/ci.yml/badge.svg">
 </p>
 <p align="center">
-  <img src="https://img.shields.io/github/stars/NIyueeE/ds-free-api.svg">
-  <img src="https://img.shields.io/github/forks/NIyueeE/ds-free-api.svg">
-  <img src="https://img.shields.io/github/last-commit/NIyueeE/ds-free-api.svg">
+  <img src="https://img.shields.io/github/stars/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/forks/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/last-commit/xuweizhengo/ds-free-api.svg">
 </p>
 
 [中文](README.md)
+
+> Fork note: this repository is a GPL-3.0 fork of [NIyueeE/ds-free-api](https://github.com/NIyueeE/ds-free-api). This fork focuses on documentation, deployment entry points, and personal maintenance.
 
 A Rust API proxy that translates DeepSeek's free web chat into standard OpenAI and Anthropic-compatible API protocols (supports chat completions and messages, including streaming and tool calling).
 
@@ -35,7 +37,7 @@ A Rust API proxy that translates DeepSeek's free web chat into standard OpenAI a
 
 ### Binary Usage
 
-1. Download and extract the archive for your platform from [releases](https://github.com/NIyueeE/ds-free-api/releases)
+1. Download and extract the archive for your platform from [releases](https://github.com/xuweizhengo/ds-free-api/releases)
 2. Copy `config.example.toml` to `config.toml` and fill in accounts (optional — you can also configure via the admin panel after startup)
 3. Run `./ds-free-api`
 4. Visit `http://127.0.0.1:22217/admin` to set an admin password, then manage API keys and accounts from the panel
@@ -62,7 +64,7 @@ The `config/` and `data/` directories are bind-mounted into the container — co
 
 ### Free Test Accounts
 
-Please register your own. You can refer to the method in [issue #62](https://github.com/NIyueeE/ds-free-api/issues/62).
+Please register your own account. Historical discussion is available in upstream [issue #62](https://github.com/NIyueeE/ds-free-api/issues/62).
 
 
 ## API Endpoints
@@ -140,13 +142,13 @@ Visit `http://127.0.0.1:22217/admin` after starting the server:
 - **Logs**: Recent request logs and runtime logs
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/web_p1.png" alt="Dashboard Overview" width="700">
+  <img src="assets/web_p1.png" alt="Dashboard Overview" width="700">
   <br>
   <em>Dashboard overview</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NIyueeE/ds-free-api/main/assets/web_p2.png" alt="Config Page" width="700">
+  <img src="assets/web_p2.png" alt="Config Page" width="700">
   <br>
   <em>Config editor page</em>
 </p>
