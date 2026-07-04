@@ -236,7 +236,7 @@ fn print_waf_hint() {
     warn!(target: "ds_core::client", "    [proxy]");
     warn!(target: "ds_core::client", "    url = \"http://127.0.0.1:7890\"");
     warn!(target: "ds_core::client", "");
-    warn!(target: "ds_core::client", "  https://github.com/xuweizhengo/ds-free-api");
+    warn!(target: "ds_core::client", "  https://github.com/xuweizhengo/deepseek-web-api");
     warn!(target: "ds_core::client", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 

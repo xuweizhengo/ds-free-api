@@ -2,18 +2,18 @@
   <img src="assets/logo.svg" width="81" height="66">
 </p>
 
-<h1 align="center">DeepSeek Web API Gateway</h1>
+<h1 align="center">DeepSeek Web API</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/ds-free-api.svg"></a>
-  <img src="https://img.shields.io/github/v/release/xuweizhengo/ds-free-api.svg">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/deepseek-web-api.svg"></a>
+  <img src="https://img.shields.io/github/v/release/xuweizhengo/deepseek-web-api.svg">
   <img src="https://img.shields.io/badge/rust-1.95.0+-93450a.svg">
-  <img src="https://github.com/xuweizhengo/ds-free-api/actions/workflows/ci.yml/badge.svg">
+  <img src="https://github.com/xuweizhengo/deepseek-web-api/actions/workflows/ci.yml/badge.svg">
 </p>
 <p align="center">
-  <img src="https://img.shields.io/github/stars/xuweizhengo/ds-free-api.svg">
-  <img src="https://img.shields.io/github/forks/xuweizhengo/ds-free-api.svg">
-  <img src="https://img.shields.io/github/last-commit/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/stars/xuweizhengo/deepseek-web-api.svg">
+  <img src="https://img.shields.io/github/forks/xuweizhengo/deepseek-web-api.svg">
+  <img src="https://img.shields.io/github/last-commit/xuweizhengo/deepseek-web-api.svg">
 </p>
 
 [English](README.en.md)
@@ -38,7 +38,7 @@
 
 ### 二进制使用
 
-1. 从 [releases](https://github.com/xuweizhengo/ds-free-api/releases) 下载对应平台压缩包并解压
+1. 从 [releases](https://github.com/xuweizhengo/deepseek-web-api/releases) 下载对应平台压缩包并解压
 2. 复制 `config.example.toml` 为 `config.toml` 并填入账号 (可选, 也可启动后在管理面板中配置)
 3. 运行 `./ds-free-api`
 4. 访问 `http://127.0.0.1:22217/admin` 设置管理密码，之后可在面板中创建 API Key 和管理账号

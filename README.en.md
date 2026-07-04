@@ -2,18 +2,18 @@
   <img src="assets/logo.svg" width="81" height="66">
 </p>
 
-<h1 align="center">DeepSeek Web API Gateway</h1>
+<h1 align="center">DeepSeek Web API</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/ds-free-api.svg"></a>
-  <img src="https://img.shields.io/github/v/release/xuweizhengo/ds-free-api.svg">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuweizhengo/deepseek-web-api.svg"></a>
+  <img src="https://img.shields.io/github/v/release/xuweizhengo/deepseek-web-api.svg">
   <img src="https://img.shields.io/badge/rust-1.95.0+-93450a.svg">
-  <img src="https://github.com/xuweizhengo/ds-free-api/actions/workflows/ci.yml/badge.svg">
+  <img src="https://github.com/xuweizhengo/deepseek-web-api/actions/workflows/ci.yml/badge.svg">
 </p>
 <p align="center">
-  <img src="https://img.shields.io/github/stars/xuweizhengo/ds-free-api.svg">
-  <img src="https://img.shields.io/github/forks/xuweizhengo/ds-free-api.svg">
-  <img src="https://img.shields.io/github/last-commit/xuweizhengo/ds-free-api.svg">
+  <img src="https://img.shields.io/github/stars/xuweizhengo/deepseek-web-api.svg">
+  <img src="https://img.shields.io/github/forks/xuweizhengo/deepseek-web-api.svg">
+  <img src="https://img.shields.io/github/last-commit/xuweizhengo/deepseek-web-api.svg">
 </p>
 
 [中文](README.md)
@@ -37,7 +37,7 @@ A Rust API proxy that translates DeepSeek's free web chat into standard OpenAI a
 
 ### Binary Usage
 
-1. Download and extract the archive for your platform from [releases](https://github.com/xuweizhengo/ds-free-api/releases)
+1. Download and extract the archive for your platform from [releases](https://github.com/xuweizhengo/deepseek-web-api/releases)
 2. Copy `config.example.toml` to `config.toml` and fill in accounts (optional — you can also configure via the admin panel after startup)
 3. Run `./ds-free-api`
 4. Visit `http://127.0.0.1:22217/admin` to set an admin password, then manage API keys and accounts from the panel
